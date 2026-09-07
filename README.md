@@ -1,7 +1,7 @@
 # keycloak-spi-browser-session-api
 
-![Keycloak 21.x](https://img.shields.io/badge/Keycloak-21.x-blue)
-![Java 11+](https://img.shields.io/badge/Java-11%2B-orange)
+![Keycloak 26.x](https://img.shields.io/badge/Keycloak-26.x-blue)
+![Java 17+](https://img.shields.io/badge/Java-17%2B-orange)
 ![License Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green)
 
 A [Keycloak](https://www.keycloak.org/) [SPI](https://www.keycloak.org/docs/latest/server_development/index.html#_providers)
@@ -11,7 +11,7 @@ your application.
 
 Useful to bridge SSO from a legacy web application - which already holds a token but has
 never performed an interactive login in this browser - to a new application that is
-protected by Keycloak (e.g. via [keycloak.js](https://www.npmjs.com/package/keycloak-js)).
+protected by Keycloak (e.g. via [keycloak-js](https://www.npmjs.com/package/keycloak-js)).
 
 > **Prerequisite:** the legacy application must be able to obtain a valid access token for
 > the realm. Without it there is nothing to convert.
@@ -73,20 +73,36 @@ Step by step, as implemented in
 
 ## Compatibility
 
-| SPI version | Keycloak      | Distribution | Java |
-|-------------|---------------|--------------|------|
-| 2.0         | 21.x          | Quarkus      | 11+  |
-| 1.0         | 14.x (legacy) | WildFly      | 8    |
+| SPI version | Keycloak      | Distribution | Java | JAX-RS namespace |
+|-------------|---------------|--------------|------|------------------|
+| 3.0         | 26.x          | Quarkus      | 17+  | `jakarta.ws.rs`  |
+| 2.0         | 21.x          | Quarkus      | 11+  | `javax.ws.rs`    |
+| 1.0         | 14.x (legacy) | WildFly      | 8    | `javax.ws.rs`    |
 
-The jar is compiled to **Java 11 bytecode**, so it loads on both Java 11 and Java 17
-Keycloak runtimes. Do not raise `java.version` in [pom.xml](pom.xml) above the Java version
-your Keycloak server actually runs on - a Java 17 build fails on a Java 11 server with
-`UnsupportedClassVersionError`. Check with `java -version` on the server, or in the
-container: `docker exec <container> java -version`.
+Version 3.0 is built and verified against **Keycloak 26.7.3**. Upgrading from 2.0 required
+three changes on the Keycloak side, none of which are backwards compatible:
 
-Keycloak 21 is still built on the `javax.ws.rs` namespace - the Jakarta EE namespace
-migration only happened in Keycloak 22, so this artifact does **not** work on Keycloak 22
-or newer without changing the imports and dependencies.
+* **Keycloak 22** migrated from `javax.*` to the **Jakarta EE namespace**, so all JAX-RS
+  imports are now `jakarta.ws.rs.*`.
+* **Keycloak 25** replaced RESTEasy Classic with **RESTEasy Reactive**, which moved the
+  `@NoCache` annotation from `org.jboss.resteasy.annotations.cache` to
+  `org.jboss.resteasy.reactive`. It now comes from
+  `io.quarkus.resteasy.reactive:resteasy-reactive-common`.
+* **Keycloak 26** moved `org.keycloak.services.resource.RealmResourceProvider` out of
+  `keycloak-services` into **`keycloak-server-spi-private`**. The package name is
+  unchanged, so only the dependency in [pom.xml](pom.xml) is affected.
+
+A 3.0 jar therefore does **not** load on Keycloak 21 or older, and a 2.0 jar does not load
+on Keycloak 22 or newer.
+
+Keycloak 26 supports OpenJDK 17, 21 and 25; the official container image runs OpenJDK 21.
+The jar is compiled to **Java 17 bytecode**, the lowest supported version, so it loads on
+all three. Do not raise `java.version` in [pom.xml](pom.xml) above the Java version your
+Keycloak server actually runs on - a newer build fails with `UnsupportedClassVersionError`.
+Check with `docker exec <container> java -version`.
+
+> Note that OpenJDK 17 support is **deprecated** in Keycloak 26 and will be removed in a
+> later release. Once your servers are on 21 or newer you may raise `java.version` to `21`.
 
 Keycloak 17+ no longer serves its endpoints under the `/auth` prefix, so the path is
 `/realms/...` and not `/auth/realms/...`. If you run the server with
@@ -98,9 +114,20 @@ Keycloak 17+ no longer serves its endpoints under the `/auth` prefix, so the pat
 mvn clean package
 ```
 
-Produces `target/keycloak-spi-browser-session-api-2.0.jar`. All Keycloak and RESTEasy
+Produces `target/keycloak-spi-browser-session-api-3.0.jar`. All Keycloak and RESTEasy
 dependencies are `provided` - the jar contains only the two SPI classes and the
 `META-INF/services` registration.
+
+To build against a different Keycloak release, override the version property:
+
+```sh
+mvn clean package -Dkeycloak.version=26.6.4
+```
+
+Within Keycloak 26 that is usually enough. Note that `quarkus.version` in
+[pom.xml](pom.xml) only supplies the `@NoCache` annotation and is pinned to the Quarkus
+version of the targeted Keycloak release (see `<quarkus.version>` in that release's
+`keycloak-parent` pom).
 
 ## Deployment
 
@@ -108,7 +135,7 @@ The Quarkus based distribution (Keycloak 17+) has no `deployments` folder any mo
 Providers are placed in `providers` and the server has to be re-augmented once:
 
 1. Build with `mvn clean package`
-2. Copy `target/keycloak-spi-browser-session-api-2.0.jar` to `/opt/keycloak/providers/`
+2. Copy `target/keycloak-spi-browser-session-api-3.0.jar` to `/opt/keycloak/providers/`
 3. Run `/opt/keycloak/bin/kc.sh build`
 4. Start Keycloak
 
@@ -243,23 +270,30 @@ deploying it.
 
 ## Local demo
 
-Starts Keycloak 21 with PostgreSQL plus two static demo apps. The `keycloak` service is
+Starts Keycloak 26 with PostgreSQL plus two static demo apps. The `keycloak` service is
 built from [Dockerfile.keycloak](Dockerfile.keycloak) and bakes in the jar from `target`,
 so build the SPI first:
 
 ```sh
 mvn clean package
-docker-compose up --build
+docker compose up --build
 ```
 
 | Service | URL | Role |
 |---------|-----|------|
 | Keycloak | <http://localhost:5080> | IDM, `admin` / `admin` |
 | `start-app` | <http://localhost:5082> | starting point - holds a JWT, no authentication of its own |
-| `dest-app` | <http://localhost:5081> | demo site secured with `keycloak.js` |
+| `dest-app` | <http://localhost:5081> | demo site secured with `keycloak-js` |
 
 The goal is to initiate a browser session for `dest-app` from `start-app`, having nothing
 but a valid JWT.
+
+> The admin user is created from `KC_BOOTSTRAP_ADMIN_USERNAME` / `KC_BOOTSTRAP_ADMIN_PASSWORD`.
+> Keycloak 26 deprecated the previous `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` names.
+>
+> [`dest-app`](demo/dest-app/index.html) loads `keycloak-js` from a CDN as an ES module.
+> Keycloak 26 no longer serves the adapter from `/js/keycloak.js` - it is a standalone,
+> ESM-only npm package now.
 
 ### Configure Keycloak
 
@@ -305,7 +339,7 @@ After rebuilding the SPI, rebuild and restart the Keycloak container so that `kc
 picks up the new jar:
 
 ```sh
-mvn clean package && docker-compose up -d --build keycloak
+mvn clean package && docker compose up -d --build keycloak
 ```
 
 ## Troubleshooting
@@ -314,11 +348,14 @@ mvn clean package && docker-compose up -d --build keycloak
 |---------|-------|
 | `404` on `/realms/{realm}/browser-session/init` | jar not in `providers/`, or `kc.sh build` was not re-run after adding it. Check *Realm settings -> Provider info* in the admin console |
 | `UnsupportedClassVersionError` on startup | jar compiled for a newer Java than the server runs. Lower `java.version` in [pom.xml](pom.xml) |
+| `NoClassDefFoundError: javax/ws/rs/...` or `ClassNotFoundException` for `org.jboss.resteasy.annotations.cache.NoCache` | a 2.0 (Keycloak 21) jar deployed on Keycloak 22+. Rebuild with this 3.0 version |
+| `NoClassDefFoundError: jakarta/ws/rs/...` | a 3.0 jar deployed on Keycloak 21 or older. Use the 2.0 branch there |
 | Redirect works but the user is still not logged in | cookies were dropped - identity cookies are `Secure`, so plain `http://` only works on `localhost` |
 | `400 invalid_redirect_uri` | the return URL is not listed in `Valid redirect URIs` of `publicClient`, or it was encoded twice and is no longer absolute |
 | `400 client_not_found` | `publicClient` does not exist in that realm, or `Client authentication` is on (confidential client) |
 | `401 invalid_token` | token expired, signed by another realm, or not passed at all |
-| Provider does not load on Keycloak 22+ | Keycloak 22 moved to the Jakarta namespace; this build targets `javax.ws.rs` |
+| `404` on `/js/keycloak.js` | Keycloak 26 no longer ships the JS adapter. Install [`keycloak-js`](https://www.npmjs.com/package/keycloak-js) from npm or load it from a CDN |
+| Admin user is not created in the demo | Keycloak 26 renamed the variables to `KC_BOOTSTRAP_ADMIN_USERNAME` / `KC_BOOTSTRAP_ADMIN_PASSWORD` |
 | Old `/auth/realms/...` URL returns `404` | Keycloak 17+ dropped the `/auth` prefix unless started with `--http-relative-path=/auth` |
 
 ## License

@@ -1,6 +1,6 @@
 package com.contabo.keycloak.spi.realmresourceprovider.browseresssion;
 
-import org.jboss.resteasy.annotations.cache.NoCache;
+import org.jboss.resteasy.reactive.NoCache;
 import org.keycloak.authorization.util.Tokens;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.events.Errors;
@@ -21,14 +21,14 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 
-import javax.ws.rs.GET;
-import javax.ws.rs.OPTIONS;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.UriInfo;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.OPTIONS;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 public class BrowserSessionRestProvider implements RealmResourceProvider {
 
@@ -92,14 +92,13 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
     final RealmModel realm = this.keycloakSession.getContext().getRealm();
 
     // create new user session and bind it to the target client Id
-    // note: as of Keycloak 15 the arguments of `getUserById` are (realm, id)
     final UserModel user = this.keycloakSession.users().getUserById(realm, validToken.getSubject());
     if (null == user || !user.isEnabled()) {
       throw new ErrorResponseException(Errors.USER_NOT_FOUND, "User not found or disabled",
           Response.Status.UNAUTHORIZED);
     }
     final ClientConnection clientConnection = this.keycloakSession.getContext().getConnection();
-    // note: the short `createUserSession` overload is deprecated as of Keycloak 21,
+    // note: the short `createUserSession` overload is still deprecated in Keycloak 26,
     // the explicit one below is its exact equivalent (no pre-set id, persistent session)
     UserSessionModel newUserSession = this.keycloakSession.sessions().createUserSession(
         null, realm, user, user.getUsername(),
@@ -134,7 +133,7 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
       // the bare origin for cross-origin navigations under the default
       // `Referrer-Policy: strict-origin-when-cross-origin`, and nothing at all on
       // an https -> http downgrade, so `redirect_uri` is the reliable way
-      candidate = this.keycloakSession.getContext().getRequestHeaders().getHeaderString("Referer");
+      candidate = this.requestHeaders().getHeaderString("Referer");
     }
     if (null == candidate || candidate.isEmpty()) {
       throw new ErrorResponseException(Errors.INVALID_REDIRECT_URI,
@@ -169,7 +168,7 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
   private String getAccessControlAllowOrigin(String targetClient) {
     ClientModel newClient = this.getValidatedTargetClient(targetClient);
     // get referer
-    String refererHeader = this.keycloakSession.getContext().getRequestHeaders().getHeaderString("Referer");
+    String refererHeader = this.requestHeaders().getHeaderString("Referer");
     String referer;
     try {
       URL url;
@@ -228,8 +227,16 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
     return token;
   }
 
+  /**
+   * `KeycloakContext.getRequestHeaders()` is deprecated as of Keycloak 26; the
+   * headers are reached through the `HttpRequest` instead.
+   */
+  private HttpHeaders requestHeaders() {
+    return this.keycloakSession.getContext().getHttpRequest().getHttpHeaders();
+  }
+
   private String bearerTokenFromAuthorizationHeader() {
-    final HttpHeaders headers = this.keycloakSession.getContext().getRequestHeaders();
+    final HttpHeaders headers = this.requestHeaders();
     final String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
     if (authorization == null) {
       return null;

@@ -6,13 +6,13 @@
 
   <groupId>com.contabo.keycloak.spi.realmresourceprovider.browseresssion</groupId>
   <artifactId>keycloak-spi-browser-session-api</artifactId>
-  <version>2.0</version>
+  <version>3.0</version>
   <build>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>3.11.0</version>
+        <version>3.13.0</version>
         <configuration>
           <release>${java.version}</release>
         </configuration>
@@ -22,15 +22,17 @@
   <packaging>jar</packaging>
 
   <properties>
-    <keycloak.version>21.1.1</keycloak.version>
-    <!-- RESTEasy version shipped with Keycloak 21 (still the javax.ws.rs namespace;
-         the Jakarta EE namespace migration only happened in Keycloak 22). -->
-    <resteasy.version>4.7.9.Final</resteasy.version>
+    <keycloak.version>26.7.3</keycloak.version>
+    <!-- Keycloak 22 migrated from javax.* to the Jakarta EE namespace, and Keycloak 25
+         replaced RESTEasy Classic with RESTEasy Reactive. `@NoCache` therefore lives in
+         org.jboss.resteasy.reactive now, shipped by the Quarkus version Keycloak builds
+         against - see <quarkus.version> in the keycloak-parent pom of this release. -->
+    <quarkus.version>3.33.3.1</quarkus.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-    <!-- Keycloak 21 runs on Java 11 or 17 - target the lower one so the jar
-         loads on both. Keycloak's own jars are Java 8 bytecode. -->
-    <java.version>11</java.version>
+    <!-- Keycloak 26 requires Java 17 and is itself compiled with release 17.
+         Java 21 is supported at runtime, so 17 bytecode loads on every supported JVM. -->
+    <java.version>17</java.version>
   </properties>
 
   <dependencies>
@@ -46,6 +48,8 @@
       <scope>provided</scope>
       <version>${keycloak.version}</version>
     </dependency>
+    <!-- carries org.keycloak.services.resource.RealmResourceProvider, which moved here
+         out of keycloak-services in Keycloak 26 -->
     <dependency>
       <groupId>org.keycloak</groupId>
       <artifactId>keycloak-server-spi-private</artifactId>
@@ -58,13 +62,13 @@
       <scope>provided</scope>
       <version>${keycloak.version}</version>
     </dependency>
-    <!-- provides javax.ws.rs plus org.jboss.resteasy.annotations.cache.NoCache;
-         provided-scope dependencies of keycloak-services are not transitive -->
+    <!-- provides org.jboss.resteasy.reactive.NoCache; keycloak-services declares this
+         one in provided scope, and provided-scope dependencies are not transitive -->
     <dependency>
-      <groupId>org.jboss.resteasy</groupId>
-      <artifactId>resteasy-core</artifactId>
+      <groupId>io.quarkus.resteasy.reactive</groupId>
+      <artifactId>resteasy-reactive-common</artifactId>
       <scope>provided</scope>
-      <version>${resteasy.version}</version>
+      <version>${quarkus.version}</version>
     </dependency>
   </dependencies>
 </project>

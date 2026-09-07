@@ -1,7 +1,6 @@
-version: '3'
 services:
   postgresql:
-    image: docker.io/library/postgres:15
+    image: docker.io/library/postgres:17
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
@@ -10,7 +9,7 @@ services:
       - 'postgresql_data:/var/lib/postgresql/data'
 
   keycloak:
-    # builds Keycloak 21.1.1 with the SPI from ./target - run `mvn clean package` first
+    # builds Keycloak 26.7.3 with the SPI from ./target - run `mvn clean package` first
     build:
       context: .
       dockerfile: Dockerfile.keycloak
@@ -23,8 +22,9 @@ services:
       KC_DB_URL: jdbc:postgresql://postgresql:5432/keycloak
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: keycloak
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Keycloak 26 renamed these - KEYCLOAK_ADMIN/KEYCLOAK_ADMIN_PASSWORD are deprecated
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
     ports:
       - "5080:8080"
 
