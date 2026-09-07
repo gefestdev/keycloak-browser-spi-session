@@ -1,0 +1,24 @@
+# Keycloak 21 image with the browser-session SPI baked in.
+#
+# The Quarkus based distribution (Keycloak 17+) has no `deployments` folder any
+# more: providers are dropped into `/opt/keycloak/providers` and the server is
+# augmented once at build time via `kc.sh build`.
+#
+# Run `mvn clean package` before building this image.
+ARG KEYCLOAK_VERSION=21.1.1
+
+FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION} AS builder
+
+ENV KC_HEALTH_ENABLED=true
+ENV KC_METRICS_ENABLED=true
+ENV KC_DB=postgres
+
+COPY target/keycloak-spi-browser-session-api-*.jar /opt/keycloak/providers/
+
+RUN /opt/keycloak/bin/kc.sh build
+
+FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
+
+COPY --from=builder /opt/keycloak/ /opt/keycloak/
+
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]

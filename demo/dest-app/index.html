@@ -1,0 +1,36 @@
+<html>
+
+<head>
+  <!-- note: Keycloak 17+ serves the adapter without the `/auth` prefix -->
+  <script src="http://localhost:5080/js/keycloak.js"></script>
+  <script>
+    var keycloak;
+
+    function initKeycloak() {
+      keycloak = new Keycloak({
+        url: 'http://localhost:5080/',
+        realm: 'master',
+        clientId: 'dest-app'
+      });
+      keycloak.init({
+        onLoad: 'login-required',
+        checkLoginIframe: false,
+      }).then(function (authenticated) {
+        alert(authenticated ? 'authenticated' : 'not authenticated');
+      });
+    }
+
+    function doLogout() {
+      // Keycloak 18+ requires `id_token_hint` / `post_logout_redirect_uri` for
+      // RP initiated logout - keycloak.js adds those for us
+      keycloak.logout({ redirectUri: 'http://localhost:5081/' });
+    }
+  </script>
+</head>
+
+<body onload="initKeycloak()">
+  <h1>Showing "hidden" contents only after successful login</h1>
+  <a href="#" onclick="doLogout(); return false;">Logout</a>
+</body>
+
+</html>

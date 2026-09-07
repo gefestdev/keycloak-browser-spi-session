@@ -1,0 +1,51 @@
+version: '3'
+services:
+  postgresql:
+    image: docker.io/library/postgres:15
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    volumes:
+      - 'postgresql_data:/var/lib/postgresql/data'
+
+  keycloak:
+    # builds Keycloak 21.1.1 with the SPI from ./target - run `mvn clean package` first
+    build:
+      context: .
+      dockerfile: Dockerfile.keycloak
+    depends_on:
+      - postgresql
+    command:
+      - start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgresql:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "5080:8080"
+
+  dest-app:
+    image: nginx
+    ports:
+      - "5081:80"
+    environment:
+      - NGINX_PORT=80
+    volumes:
+      - ./demo/dest-app:/usr/share/nginx/html
+
+  start-app:
+    image: nginx
+    ports:
+      - "5082:80"
+    environment:
+      - NGINX_PORT=80
+    volumes:
+      - ./demo/start-app:/usr/share/nginx/html
+
+volumes:
+  postgresql_data:
+    driver: local
