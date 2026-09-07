@@ -4,6 +4,8 @@
 ![Java 11+](https://img.shields.io/badge/Java-11%2B-orange)
 ![License Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green)
 
+This is a fork of the original repository.: [keycloak-spi-browser-session-api](https://github.com/contabo/keycloak-spi-browser-session-api)
+
 A [Keycloak](https://www.keycloak.org/) [SPI](https://www.keycloak.org/docs/latest/server_development/index.html#_providers)
 that turns a valid access token (JWT) into a **real browser session**: it creates a user
 session in Keycloak, sets Keycloak's identity cookies and redirects the browser back to
