@@ -1,11 +1,11 @@
-# Keycloak 21 image with the browser-session SPI baked in.
+# Keycloak 26 image with the browser-session SPI baked in.
 #
 # The Quarkus based distribution (Keycloak 17+) has no `deployments` folder any
 # more: providers are dropped into `/opt/keycloak/providers` and the server is
 # augmented once at build time via `kc.sh build`.
 #
 # Run `mvn clean package` before building this image.
-ARG KEYCLOAK_VERSION=21.1.1
+ARG KEYCLOAK_VERSION=26.7.3
 
 FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION} AS builder
 

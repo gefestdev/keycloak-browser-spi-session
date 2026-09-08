@@ -1,8 +1,10 @@
 package com.contabo.keycloak.spi.realmresourceprovider.browseresssion;
 
-import org.jboss.resteasy.annotations.cache.NoCache;
+import org.jboss.resteasy.reactive.NoCache;
+import org.keycloak.TokenVerifier;
 import org.keycloak.authorization.util.Tokens;
 import org.keycloak.common.ClientConnection;
+import org.keycloak.common.VerificationException;
 import org.keycloak.events.Errors;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
@@ -12,6 +14,7 @@ import org.keycloak.models.UserSessionModel;
 import org.keycloak.protocol.oidc.utils.RedirectUtils;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.services.ErrorResponseException;
+import org.keycloak.services.Urls;
 import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.resource.RealmResourceProvider;
 import org.keycloak.utils.MediaType;
@@ -21,16 +24,19 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 
-import javax.ws.rs.GET;
-import javax.ws.rs.OPTIONS;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.UriInfo;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.OPTIONS;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 public class BrowserSessionRestProvider implements RealmResourceProvider {
+
+  private static final String TEXT_HTML_UTF_8 = "text/html; charset=utf-8";
+  private static final long MAX_INTERSTITIAL_DELAY_MS = 10_000L;
 
   private final KeycloakSession keycloakSession;
 
@@ -92,14 +98,13 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
     final RealmModel realm = this.keycloakSession.getContext().getRealm();
 
     // create new user session and bind it to the target client Id
-    // note: as of Keycloak 15 the arguments of `getUserById` are (realm, id)
     final UserModel user = this.keycloakSession.users().getUserById(realm, validToken.getSubject());
     if (null == user || !user.isEnabled()) {
       throw new ErrorResponseException(Errors.USER_NOT_FOUND, "User not found or disabled",
           Response.Status.UNAUTHORIZED);
     }
     final ClientConnection clientConnection = this.keycloakSession.getContext().getConnection();
-    // note: the short `createUserSession` overload is deprecated as of Keycloak 21,
+    // note: the short `createUserSession` overload is still deprecated in Keycloak 26,
     // the explicit one below is its exact equivalent (no pre-set id, persistent session)
     UserSessionModel newUserSession = this.keycloakSession.sessions().createUserSession(
         null, realm, user, user.getUsername(),
@@ -114,11 +119,107 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
         newUserSession.getUser(), newUserSession,
         uriInfo, clientConnection);
 
-    // finally send the browser back to the application it came from
+    // finally send the browser back to the application it came from - through a
+    // page the browser really renders, so the cookies are committed first
+    return this.redirectResponse(targetUri);
+  }
+
+  /**
+   * Sends the browser on to the application.
+   *
+   * By default this is not a bare `302` but an actual - empty - HTML document
+   * that carries the `Set-Cookie` headers and only then navigates on. A redirect
+   * is a response the browser consumes internally: the identity cookies are
+   * written while nothing is ever painted, and a prefetching browser, an
+   * intermediary or a privacy mode that treats the hop as a tracking redirect can
+   * drop them on the way. A rendered document is a page the browser commits as
+   * the current top level document, so the cookies are stored before the
+   * navigation to the application even starts.
+   *
+   * Set `BSAPI_INTERSTITIAL=false` to go back to the plain `302`, and
+   * `BSAPI_INTERSTITIAL_DELAY_MS` to keep the page on screen for a moment.
+   */
+  private Response redirectResponse(URI targetUri) {
+    if (!interstitialEnabled()) {
+      return Response
+          .status(Response.Status.FOUND)
+          .location(targetUri)
+          .build();
+    }
     return Response
-        .status(Response.Status.FOUND)
-        .location(targetUri)
+        .ok(this.interstitialPage(targetUri), TEXT_HTML_UTF_8)
+        .header(HttpHeaders.CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")
+        .header("Pragma", "no-cache")
+        // this page's own URL still carries the access token, so it must not reach
+        // the application as the `Referer` of the follow up navigation - unlike a
+        // `302`, a document initiated navigation would send one
+        .header("Referrer-Policy", "no-referrer")
         .build();
+  }
+
+  /**
+   * A blank page whose only job is to exist for one paint and then replace itself
+   * with the application. `location.replace` rather than an assignment, so the
+   * token bearing URL does not end up in the browser history; the `meta refresh`
+   * is the fallback for a browser without JavaScript.
+   */
+  private String interstitialPage(URI targetUri) {
+    final long delayMs = interstitialDelayMs();
+    final long refreshSeconds = (delayMs + 999L) / 1000L;
+    final String href = escapeHtmlAttribute(targetUri.toString());
+    return "<!DOCTYPE html>\n"
+        + "<html lang=\"en\">\n"
+        + "<head>\n"
+        + "<meta charset=\"utf-8\">\n"
+        + "<meta name=\"referrer\" content=\"no-referrer\">\n"
+        + "<meta http-equiv=\"refresh\" content=\"" + refreshSeconds + ";url=" + href + "\">\n"
+        // a zero width space: an empty or missing title makes the browser label the
+        // tab with the URL, and that URL carries the access token
+        + "<title>&#8203;</title>\n"
+        + "<style>html,body{height:100%;margin:0;background:#fff}#bs-continue{display:none}</style>\n"
+        + "</head>\n"
+        + "<body>\n"
+        // the anchor carries the target, so the script below never has to embed a
+        // URL into a JavaScript string literal
+        + "<a id=\"bs-continue\" href=\"" + href + "\">Continue</a>\n"
+        + "<noscript><a href=\"" + href + "\">Continue</a></noscript>\n"
+        + "<script>\n"
+        + "(function(){var t=document.getElementById('bs-continue').href;"
+        + "window.setTimeout(function(){window.location.replace(t);}," + delayMs + ");})();\n"
+        + "</script>\n"
+        + "</body>\n"
+        + "</html>\n";
+  }
+
+  private static boolean interstitialEnabled() {
+    final String configured = System.getenv("BSAPI_INTERSTITIAL");
+    return null == configured || !"false".equalsIgnoreCase(configured.trim());
+  }
+
+  /**
+   * How long the blank page stays on screen before it navigates on. `0` - the
+   * default - still renders the page, it just leaves it again as soon as it is
+   * there. Capped, so a typo cannot strand the user on an empty page.
+   */
+  private static long interstitialDelayMs() {
+    final String configured = System.getenv("BSAPI_INTERSTITIAL_DELAY_MS");
+    if (null == configured || configured.trim().isEmpty()) {
+      return 0L;
+    }
+    try {
+      return Math.max(0L, Math.min(MAX_INTERSTITIAL_DELAY_MS, Long.parseLong(configured.trim())));
+    } catch (NumberFormatException e) {
+      return 0L;
+    }
+  }
+
+  private static String escapeHtmlAttribute(String value) {
+    return value
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&#39;");
   }
 
   /**
@@ -134,7 +235,7 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
       // the bare origin for cross-origin navigations under the default
       // `Referrer-Policy: strict-origin-when-cross-origin`, and nothing at all on
       // an https -> http downgrade, so `redirect_uri` is the reliable way
-      candidate = this.keycloakSession.getContext().getRequestHeaders().getHeaderString("Referer");
+      candidate = this.requestHeaders().getHeaderString("Referer");
     }
     if (null == candidate || candidate.isEmpty()) {
       throw new ErrorResponseException(Errors.INVALID_REDIRECT_URI,
@@ -169,7 +270,7 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
   private String getAccessControlAllowOrigin(String targetClient) {
     ClientModel newClient = this.getValidatedTargetClient(targetClient);
     // get referer
-    String refererHeader = this.keycloakSession.getContext().getRequestHeaders().getHeaderString("Referer");
+    String refererHeader = this.requestHeaders().getHeaderString("Referer");
     String referer;
     try {
       URL url;
@@ -222,14 +323,51 @@ public class BrowserSessionRestProvider implements RealmResourceProvider {
     }
     final AccessToken token = Tokens.getAccessToken(accessToken, this.keycloakSession);
     if (token == null) {
-      throw new ErrorResponseException(Errors.INVALID_TOKEN, "Invalid or expired access token",
+      throw new ErrorResponseException(Errors.INVALID_TOKEN,
+          "Invalid or expired access token" + this.issuerMismatchHint(accessToken),
           Response.Status.UNAUTHORIZED);
     }
     return token;
   }
 
+  /**
+   * By far the most common reason for a rejected token is an issuer mismatch.
+   * Keycloak validates the token against the realm URL it derives from the
+   * incoming request, so a token minted through a different address - an internal
+   * server-to-server URL, or a proxy whose headers Keycloak is not configured to
+   * trust - never verifies, no matter how valid it is. Spell that out rather than
+   * leaving the caller with a bare "invalid token".
+   */
+  private String issuerMismatchHint(String accessToken) {
+    final String expectedIssuer = Urls.realmIssuer(
+        this.keycloakSession.getContext().getUri().getBaseUri(),
+        this.keycloakSession.getContext().getRealm().getName());
+    final String tokenIssuer;
+    try {
+      tokenIssuer = TokenVerifier.create(accessToken, AccessToken.class).getToken().getIssuer();
+    } catch (VerificationException e) {
+      return "";
+    }
+    if (null == tokenIssuer || expectedIssuer.equals(tokenIssuer)) {
+      return "";
+    }
+    return String.format(
+        " - issuer mismatch: the token was issued by `%s`, but this endpoint validates against `%s`."
+            + " Obtain the token through the same public Keycloak URL the browser uses, and make sure"
+            + " `hostname` and `proxy-headers` are configured so Keycloak sees its public address.",
+        tokenIssuer, expectedIssuer);
+  }
+
+  /**
+   * `KeycloakContext.getRequestHeaders()` is deprecated as of Keycloak 26; the
+   * headers are reached through the `HttpRequest` instead.
+   */
+  private HttpHeaders requestHeaders() {
+    return this.keycloakSession.getContext().getHttpRequest().getHttpHeaders();
+  }
+
   private String bearerTokenFromAuthorizationHeader() {
-    final HttpHeaders headers = this.keycloakSession.getContext().getRequestHeaders();
+    final HttpHeaders headers = this.requestHeaders();
     final String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
     if (authorization == null) {
       return null;
