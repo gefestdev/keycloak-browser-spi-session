@@ -23,6 +23,7 @@ protected by Keycloak (e.g. via [keycloak-js](https://www.npmjs.com/package/keyc
 - [Build](#build)
 - [Deployment](#deployment)
 - [Configuration](#configuration)
+- [Reverse proxy and issuer consistency](#reverse-proxy-and-issuer-consistency)
 - [API](#api)
 - [Usage](#usage)
 - [Security considerations](#security-considerations)
@@ -37,8 +38,17 @@ browser to the SPI, the SPI creates the session and sets the cookies, and then r
 the browser back:
 
 ```
-application  --(302, ?token=...)-->  SPI  --(302 + Set-Cookie)-->  application
+application  --(302, ?token=...)-->  SPI  --(200 blank page + Set-Cookie)-->  application
 ```
+
+The last hop is deliberately **not** a bare `302`. A redirect is a response the browser
+consumes internally - nothing is ever painted, and a prefetching browser, an intermediary
+or a privacy mode that treats the hop as a tracking redirect can drop the cookies on the
+way. Instead the SPI answers with a real, empty HTML document that carries the
+`Set-Cookie` headers; the browser commits that page as the current top level document -
+so the cookies are stored - and only then the page navigates on to the application
+(`location.replace`, with a `meta refresh` as the no-JavaScript fallback). See
+[Configuration](#configuration) for `BSAPI_INTERSTITIAL` and `BSAPI_INTERSTITIAL_DELAY_MS`.
 
 ```mermaid
 sequenceDiagram
@@ -54,8 +64,9 @@ sequenceDiagram
     K->>K: validate redirect target against client's redirect URIs
     K->>K: load user by `sub`, must exist & be enabled
     K->>K: create UserSession + ClientSession
-    K-->>B: 302 Found + Set-Cookie (Keycloak identity cookies)
-    B->>D: follow redirect - now an authenticated SSO session exists
+    K-->>B: 200 OK, blank HTML page + Set-Cookie (Keycloak identity cookies)
+    B->>B: render the page - cookies are committed
+    B->>D: page navigates on - now an authenticated SSO session exists
 ```
 
 Step by step, as implemented in
@@ -69,7 +80,11 @@ Step by step, as implemented in
 5. A `UserSessionModel` (auth method `KEYCLOAK`, persistent, remember-me off) and a client
    session for `publicClient` are created.
 6. `AuthenticationManager.createLoginCookie` sets Keycloak's identity cookies.
-7. The response is `302 Found` pointing at the redirect target.
+7. The response is `200 OK` with a blank HTML page that carries those cookies and then
+   sends the browser to the redirect target itself. It is served `no-store` and with
+   `Referrer-Policy: no-referrer` plus a matching `<meta name="referrer">`, so the token
+   bearing URL of this page never reaches the application as a `Referer`.
+   Set `BSAPI_INTERSTITIAL=false` for the previous `302 Found` behaviour.
 
 ## Compatibility
 
@@ -166,22 +181,74 @@ parameters and by Keycloak's own client settings.
 | Allowed redirect targets | `Valid redirect URIs` of `publicClient` |
 | CORS origin (preflight only) | `Web origins` of `publicClient` |
 
-The only environment variable is:
+The environment variables are:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BSAPI_ACCESS_CONTROL_ALLOW_HEADERS` | `origin, content-type, accept, authorization` | Overrides `Access-Control-Allow-Headers` on the `OPTIONS` preflight response |
+| `BSAPI_INTERSTITIAL` | `true` | Whether to hand the browser a blank HTML page that carries the cookies and then navigates on. `false` answers with a plain `302 Found` instead |
+| `BSAPI_INTERSTITIAL_DELAY_MS` | `0` | How long that page stays on screen before it navigates on, in milliseconds (capped at `10000`). `0` still renders the page, it just leaves again as soon as it is there |
 
 Note that the redirect target is validated against the `Valid redirect URIs` of
 `publicClient` using the same check Keycloak applies to OIDC redirects (wildcards
 supported). **The URL you want to come back to has to be listed on that client**, even when
 the returning page belongs to a different application.
 
+## Reverse proxy and issuer consistency
+
+This is by far the most common reason for *"the redirect happens but no cookies appear"*,
+and the behaviour changed between the old WildFly era releases and Keycloak 26.
+
+Keycloak derives the realm URL from the **incoming request** and uses it for two things:
+
+* the `iss` claim it requires on the access token you pass in, and
+* the `iss` baked into the identity cookie, which is verified again on every later request
+  (`TokenVerifier ... .realmUrl(Urls.realmIssuer(uriInfo.getBaseUri(), realm.getName()))`).
+
+If those URLs disagree the token is rejected with `401 invalid_token` and **no cookies are
+set at all**. Two rules follow:
+
+1. **Fetch the token through the same public URL the browser uses.** A token obtained
+   server-to-server from `http://keycloak:8080` carries `iss: http://keycloak:8080/realms/{realm}`
+   and will never validate on `https://keycloak.example.org`.
+2. **Tell Keycloak its public address.** Keycloak 26 ignores `X-Forwarded-*` unless
+   `proxy-headers` is set explicitly - unset, it resolves everything to the internal address.
+
+```sh
+KC_HOSTNAME=https://keycloak.example.org
+KC_PROXY_HEADERS=xforwarded     # or `forwarded`, matching your proxy
+KC_HTTP_ENABLED=true            # when the proxy speaks plain http to Keycloak
+```
+
+and on the proxy (nginx):
+
+```nginx
+proxy_set_header Host              $host;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host  $host;
+```
+
+Keycloak 11 derived the cookie's `Secure` flag from the realm's *Require SSL* setting
+(`realm.getSslRequired().isRequired(connection)`). Keycloak 26 derives it from the scheme of
+the request as the server sees it (`SecureContextResolver.isSecureContext`), so a
+misconfigured proxy now changes the cookie attributes too.
+
+To see what the endpoint actually returns:
+
+```sh
+curl -si "https://keycloak.example.org/realms/{realm}/browser-session/init\
+?publicClient=app&token=$TOKEN&redirect_uri=https%3A%2F%2Fapp.example.org%2F" | head -20
+```
+
+`200` plus two `Set-Cookie` headers is success - the HTML body is the blank page that
+carries the browser on to `redirect_uri`. `401` means the token was rejected - the error
+description names both issuers when they differ.
+
 ## API
 
 | Method    | Path                                             | Description |
 |-----------|--------------------------------------------------|-------------|
-| `GET`     | `{baseUrl}/realms/{realm}/browser-session/init`   | Creates the browser session, answers `302 Found` with the session cookies |
+| `GET`     | `{baseUrl}/realms/{realm}/browser-session/init`   | Creates the browser session, answers `200 OK` with the session cookies and a blank page that redirects on |
 | `OPTIONS` | `{baseUrl}/realms/{realm}/browser-session/init`   | CORS preflight, kept for the legacy XHR flow |
 
 ### Query parameters
@@ -204,7 +271,7 @@ cross-origin navigations, and nothing at all on an `https` -> `http` downgrade. 
 
 | Status             | `error`                | When |
 |--------------------|------------------------|------|
-| `302 Found`        | -                      | success - `Location` points at the redirect target, cookies are set |
+| `200 OK`           | -                      | success - blank HTML page, cookies are set, the page navigates to the redirect target (`302 Found` with a `Location` header when `BSAPI_INTERSTITIAL=false`) |
 | `400 Bad Request`  | `client_not_found`     | `publicClient` is unknown or is not a public client |
 | `400 Bad Request`  | `invalid_redirect_uri` | no `redirect_uri` and no `Referer` to fall back to; target not listed on the client; target not an absolute URL |
 | `401 Unauthorized` | `invalid_token`        | no token given, malformed `Authorization` header, or invalid/expired token |
@@ -354,6 +421,8 @@ mvn clean package && docker compose up -d --build keycloak
 | `400 invalid_redirect_uri` | the return URL is not listed in `Valid redirect URIs` of `publicClient`, or it was encoded twice and is no longer absolute |
 | `400 client_not_found` | `publicClient` does not exist in that realm, or `Client authentication` is on (confidential client) |
 | `401 invalid_token` | token expired, signed by another realm, or not passed at all |
+| `401 invalid_token` and no cookies at all | issuer mismatch - the token was minted through a different Keycloak URL than the one the browser hits. See [Reverse proxy and issuer consistency](#reverse-proxy-and-issuer-consistency) |
+| Cookies are set but the user is still anonymous later | the identity cookie's `iss` no longer matches the realm URL, usually an unstable `hostname` / `proxy-headers` setup |
 | `404` on `/js/keycloak.js` | Keycloak 26 no longer ships the JS adapter. Install [`keycloak-js`](https://www.npmjs.com/package/keycloak-js) from npm or load it from a CDN |
 | Admin user is not created in the demo | Keycloak 26 renamed the variables to `KC_BOOTSTRAP_ADMIN_USERNAME` / `KC_BOOTSTRAP_ADMIN_PASSWORD` |
 | Old `/auth/realms/...` URL returns `404` | Keycloak 17+ dropped the `/auth` prefix unless started with `--http-relative-path=/auth` |
